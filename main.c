@@ -270,24 +270,22 @@ int main(void) {
 
 	setUpGPIO();
 
-//	Traffic_Flow_Queue = xQueueCreate(mainQUEUE_LENGTH, sizeof(uint32_t));
-//	Traffic_Light_Delay_Queue = xQueueCreate(mainQUEUE_LENGTH, sizeof(uint32_t));
-//	Traffic_Display_Queue = xQueueCreate(mainQUEUE_LENGTH, sizeof(uint32_t));
-//
-//	// Flow_Semaphore = xSemaphoreCreateCount( 2, 0 );
-//	Change_Light_Flag = xEventGroupCreate();
-//
-//	// Start tasks
-//	xTaskCreate( Traffic_Flow_Task, "Traffic_Flow", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-//	xTaskCreate( Traffic_Creator_Task, "Traffic_Creator", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-//	xTaskCreate( Traffic_Light_Task, "Traffic_Light", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-//	xTaskCreate( Traffic_Display_Task, "Traffic_Display", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-//
-//	// Start tasks and timers
-//	vTaskStartScheduler();
+	Traffic_Flow_Queue = xQueueCreate(mainQUEUE_LENGTH, sizeof(uint32_t));
+	Traffic_Light_Delay_Queue = xQueueCreate(mainQUEUE_LENGTH, sizeof(uint32_t));
+	Traffic_Display_Queue = xQueueCreate(mainQUEUE_LENGTH, sizeof(uint32_t));
 
-	enumerate_traffic(0b10101101010101);
+	// Flow_Semaphore = xSemaphoreCreateCount( 2, 0 );
+	Change_Light_Flag = xEventGroupCreate();
 
+	// Start tasks
+	xTaskCreate( Traffic_Flow_Task, "Traffic_Flow", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+	xTaskCreate( Traffic_Creator_Task, "Traffic_Creator", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+	xTaskCreate( Traffic_Light_Task, "Traffic_Light", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+	xTaskCreate( Traffic_Display_Task, "Traffic_Display", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+
+	//Start tasks and timers
+	vTaskStartScheduler();
+//	enumerate_traffic(0b1111111100000000000000);
 }
 
 static void Traffic_Flow_Task() {
@@ -366,6 +364,7 @@ static void Traffic_Creator_Task() {
 					}
 
 				}
+				prev_traffic = traffic_to_display;
 				xQueueSend(Traffic_Display_Queue, &traffic_to_display, 1000);
 			}
 
@@ -441,7 +440,7 @@ unsigned int shift_traffic(unsigned int prev_traffic, int change_light, int add_
 
 	// shift middle three lights
 	unsigned int middle_three_cars = (prev_traffic >> 8 & 0x3);
-	unsigned int shifted_middle_three_cars = middle_three_cars << 1 | (first_eight_cars >> 8 & 0x1);
+	unsigned int shifted_middle_three_cars = (middle_three_cars << 1 | (first_eight_cars >> 8 & 0x1));
 
 	// transition the light colour
 	unsigned int light_colour = prev_traffic >> 11 & 0x7;
@@ -455,9 +454,8 @@ unsigned int shift_traffic(unsigned int prev_traffic, int change_light, int add_
 
 	//shift the last eight lights
 	unsigned int last_eight_cars = (prev_traffic >> 14) & 0xFF;
-	unsigned int shifted_last_eight_cars = (last_eight_cars << 1 & 0xFF) | (middle_three_cars >> 2 & 0x1);
-	unsigned int updated_traffic = ((shifted_last_eight_cars << 14)| (new_light_colour << 11)| (shifted_middle_three_cars << 8)| (shifted_first_eight_cars));
-
+	unsigned int shifted_last_eight_cars = ((last_eight_cars << 1) | (prev_traffic >> 10 & 0x1)) & 0xFF;
+	unsigned int updated_traffic = (((shifted_last_eight_cars | 0x00) << 14) | (new_light_colour << 11)| (shifted_middle_three_cars << 8)| (shifted_first_eight_cars));
 
 	return updated_traffic;
 
@@ -468,12 +466,12 @@ static void enumerate_traffic(unsigned int traffic_to_display) {
 	GPIO_ResetBits(GPIOC, GPIO_Pin_8);
 	GPIO_SetBits(GPIOC, GPIO_Pin_8);
 
-	int number_lights = 14;
-	int current_light = 0;
+	unsigned int number_lights = 22;
+	unsigned int current_light = 0;
 
 
-	while(current_light < number_lights) {
-		unsigned int emulated_light = (traffic_to_display >> current_light) & 0x1;
+	while(current_light <= number_lights) {
+		unsigned int emulated_light = (traffic_to_display >> (number_lights - current_light)) & 0x1;
 
 		printf("%d\n", emulated_light);
 
