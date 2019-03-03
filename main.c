@@ -173,6 +173,7 @@ the queue empty. */
  * that was not already performed before main() was called.
  */
 static void prvSetupHardware( void );
+void vTrafficLightCallback(void* arg);
 
 /// Traffic 10101010 001 (green yellow) 010 01010101
 // 01010100 010 (yellow light) 100 10101011
@@ -184,8 +185,8 @@ static void prvSetupHardware( void );
 #include <stdlib.h>
 
 static unsigned int get_next_light_colour(unsigned int);
-static void enumerate_traffic(unsigned int traffic_to_display);
-unsigned int shift_traffic(unsigned int prev_traffic, int change_light, int add_car);
+static void enumerate_traffic(uint32_t traffic_to_display);
+uint32_t shift_traffic(int add_car);
 
 static void traffic_flow_task();
 static void traffic_creator_task();
@@ -212,8 +213,8 @@ GPIO_InitTypeDef  GPIO_InitStructureC;
 GPIO_InitTypeDef  GPIO_InitStructureA;
 
 // set these vals
-int MAX_RANGE_POT_VAL = 3;
-int MED_RANGE_POT_VAL = 2;
+int MAX_RANGE_POT_VAL = 3048;
+int MED_RANGE_POT_VAL = 2048;
 int MIN_RANGE_POT_VAL = 1;
 
 int MAX_TRAFFIC = 3;
@@ -224,6 +225,8 @@ int NO_TRAFFIC = 0;
 int MAX_TRAFFIC_DELAY = 2000;
 int MED_TRAFFIC_DELAY = 4000;
 int MIN_TRAFFIC_DELAY = 6000;
+
+int GREEN_LIGHT = 0b001;
 
 unsigned int ADD_CAR = 1;
 unsigned int DO_NOT_ADD_CAR = 0;
@@ -236,14 +239,50 @@ xQueueHandle Traffic_Flow_Queue = 0;
 xQueueHandle Traffic_Light_Delay_Queue = 0;
 xQueueHandle Traffic_Display_Queue = 0;
 
+TimerHandle_t Traffic_Light_Timer;
 
-EventGroupHandle_t Change_Light_Flag;
+xQueueHandle Change_Light_Flag;
 SemaphoreHandle_t Flow_Semaphore;
 
 static void setUpADC() {
+	/* PA1 -> POT */
+	ADC_CommonInitTypeDef ADC_CommonInitStructure;
+	ADC_InitTypeDef ADC_InitStructure;
+
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
+
+	GPIO_InitStructureA.GPIO_Pin =  GPIO_Pin_1;
+	GPIO_InitStructureA.GPIO_Mode = GPIO_Mode_AN;
+	GPIO_InitStructureA.GPIO_PuPd = GPIO_PuPd_NOPULL;
+	GPIO_InitStructureA.GPIO_Speed = GPIO_Speed_2MHz;
+
+	GPIO_Init(GPIOA, &GPIO_InitStructureA);
+//
+//	ADC_CommonInitStructure.ADC_Mode = ADC_Mode_Independent;
+//	ADC_CommonInitStructure.ADC_Prescaler = ADC_Prescaler_Div8;
+//	ADC_CommonInitStructure.ADC_DMAAccessMode = ADC_DMAAccessMode_Disabled;
+//	ADC_CommonInitStructure.ADC_TwoSamplingDelay = ADC_TwoSamplingDelay_5Cycles;
+//	ADC_CommonInit(&ADC_CommonInitStructure);
+
+	// ADC1 Structure
+	ADC_InitStructure.ADC_Resolution = ADC_Resolution_12b;
+	ADC_InitStructure.ADC_ScanConvMode = DISABLE;
+	ADC_InitStructure.ADC_ContinuousConvMode = ENABLE;
+	ADC_InitStructure.ADC_ExternalTrigConvEdge = ADC_ExternalTrigConvEdge_None;
+	ADC_InitStructure.ADC_DataAlign = ADC_DataAlign_Right;
+	ADC_InitStructure.ADC_NbrOfConversion = 1;
+
+	// Initializing ADC
+	ADC_Init(ADC1, &ADC_InitStructure);
+
+	// Set Channel for ADC
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_11, 1, ADC_SampleTime_144Cycles);
+
+	// Enable ADC1
+	ADC_Cmd(ADC1, ENABLE);
 
 }
-
 static void setUpGPIO(){
 	/* PC6 -> A, B*/
 	/* PC8 -> CLR*/
@@ -261,21 +300,28 @@ static void setUpGPIO(){
 }
 
 static unsigned int get_pot_val() {
-	return 1;
-}
+	ADC_SoftwareStartConv(ADC1);
 
+	while (!ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC));
+
+	return ADC_GetConversionValue(ADC1);
+}
 
 int main(void) {
 	srand(time(NULL));
 
 	setUpGPIO();
+	setUpADC();
 
 	Traffic_Flow_Queue = xQueueCreate(mainQUEUE_LENGTH, sizeof(uint32_t));
 	Traffic_Light_Delay_Queue = xQueueCreate(mainQUEUE_LENGTH, sizeof(uint32_t));
 	Traffic_Display_Queue = xQueueCreate(mainQUEUE_LENGTH, sizeof(uint32_t));
 
+	Traffic_Light_Timer = xTimerCreate( "Traffic_Light_Timer", pdMS_TO_TICKS( 1000 ), pdFALSE, ( void * ) 0, vTrafficLightCallback);
+
+
 	// Flow_Semaphore = xSemaphoreCreateCount( 2, 0 );
-	Change_Light_Flag = xEventGroupCreate();
+	Change_Light_Flag =  xQueueCreate(mainQUEUE_LENGTH, sizeof(uint32_t));
 
 	// Start tasks
 	xTaskCreate( Traffic_Flow_Task, "Traffic_Flow", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
@@ -283,17 +329,19 @@ int main(void) {
 	xTaskCreate( Traffic_Light_Task, "Traffic_Light", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 	xTaskCreate( Traffic_Display_Task, "Traffic_Display", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 
+
+	xTimerStart(Traffic_Light_Timer, 100);
+
 	//Start tasks and timers
 	vTaskStartScheduler();
-//	enumerate_traffic(0b1111111100000000000000);
 }
 
 static void Traffic_Flow_Task() {
-	uint8_t flow_rate;
+	uint32_t flow_rate;
 	while (1) {
-		unsigned int pot_val = get_pot_val();
+		uint16_t pot_val = get_pot_val();
 
-		if(pot_val >= MAX_RANGE_POT_VAL) {
+        if(pot_val >= MAX_RANGE_POT_VAL) {
 			// set the traffic flow to max
 			flow_rate = MAX_TRAFFIC;
 		}
@@ -319,93 +367,106 @@ static void Traffic_Flow_Task() {
 }
 
 static void Traffic_Creator_Task() {
-	uint8_t flow_rate;
+	uint32_t flow_rate;
 
-	int rounds_since_last_added_car = 0;
-	unsigned int prev_traffic = 0;
+	int rounds_since_last_added_car = 0b00;
 	uint32_t traffic_to_display;
 
 	while (1) {
-		// if ( xSemaphoreTask(Flow_Semaphore, (TickType_t) 10) == pdTRUE ) {
-			if ( xQueueReceive(Traffic_Flow_Queue, &flow_rate, 500) ) {
-				// need to get notification on changing traffic light
+		if ( xQueueReceive(Traffic_Flow_Queue, &flow_rate, 500) ) {
 
-				unsigned int change_light = xEventGroupGetBits(Change_Light_Flag);
-
-				if (flow_rate >= MAX_TRAFFIC) {
-					if (rounds_since_last_added_car > 1 || rand() % 2 == 0) {
-						traffic_to_display = shift_traffic(prev_traffic, change_light, ADD_CAR);
-						rounds_since_last_added_car = 0;
-					}
-					else {
-						traffic_to_display = shift_traffic(prev_traffic, change_light, DO_NOT_ADD_CAR);
-						rounds_since_last_added_car++ ;
-					}
-				}
-				else if (flow_rate >= MED_TRAFFIC) {
-					if (rounds_since_last_added_car > 4 || rand() % 3 == 0) {
-						traffic_to_display = shift_traffic(prev_traffic, change_light, ADD_CAR);
-						rounds_since_last_added_car = 0;
-					}
-					else {
-						traffic_to_display = shift_traffic(prev_traffic, change_light, DO_NOT_ADD_CAR);
-						rounds_since_last_added_car++ ;
-					}
+			if (flow_rate >= MAX_TRAFFIC) {
+				if (rounds_since_last_added_car > 0) {
+					traffic_to_display = shift_traffic(ADD_CAR);
+					rounds_since_last_added_car = 0;
 				}
 				else {
-					if (rounds_since_last_added_car > 8 || rand() % 5 == 0){
-						traffic_to_display = shift_traffic(prev_traffic, change_light, ADD_CAR);
-						rounds_since_last_added_car = 0;
-
-					}
-					else {
-						traffic_to_display = shift_traffic(prev_traffic, change_light, DO_NOT_ADD_CAR);
-						rounds_since_last_added_car++ ;
-					}
+					traffic_to_display = shift_traffic(DO_NOT_ADD_CAR);
+					rounds_since_last_added_car++ ;
+				}
+			}
+			else if (flow_rate >= MED_TRAFFIC) {
+				if (rounds_since_last_added_car > 4) {
+					traffic_to_display = shift_traffic(ADD_CAR);
+					rounds_since_last_added_car = 0;
+				}
+				else {
+					traffic_to_display = shift_traffic( DO_NOT_ADD_CAR);
+					rounds_since_last_added_car++ ;
+				}
+			}
+			else if(flow_rate >= MIN_TRAFFIC) {
+				if (rounds_since_last_added_car > 8){
+					traffic_to_display = shift_traffic(ADD_CAR);
+					rounds_since_last_added_car = 0;
 
 				}
-				prev_traffic = traffic_to_display;
-				xQueueSend(Traffic_Display_Queue, &traffic_to_display, 1000);
+				else {
+					traffic_to_display = shift_traffic(DO_NOT_ADD_CAR);
+					rounds_since_last_added_car++ ;
+				}
+
+			}
+			else {
+				traffic_to_display = shift_traffic(DO_NOT_ADD_CAR);
+				rounds_since_last_added_car++ ;
 			}
 
-			vTaskDelay(1000);
+			// send twice, one for traffic display and one as reference to previous traffic for shifting
+
+			xQueueSend(Traffic_Display_Queue, &traffic_to_display, 1000);
+			xQueueSend(Traffic_Display_Queue, &traffic_to_display, 1000);
+
 		}
-	//}
+
+		vTaskDelay(1000);
+	}
 }
 static void Traffic_Light_Task() {
-	uint8_t flow_rate;
+	uint32_t flow_rate;
 
 	int rounds_since_light_change = 0;
-	int light_delay = 0;
+	int light_delay = 1;
 
 	while(1)
 	{
-		// if (xSemaphoreTask(Flow_Semaphore, (TickType_t) 10) == pdTRUE) {
-			// Get flow rate from queue
-			if (xQueueReceive(Traffic_Flow_Queue, &flow_rate, 500)) {
-				if (flow_rate >= MAX_TRAFFIC && rounds_since_light_change > 1) {
-					xEventGroupSetBits(Change_Light_Flag, 0);
-					xQueueSend(Traffic_Light_Delay_Queue, &MAX_TRAFFIC_DELAY, 1000);
-					rounds_since_light_change = 0;
-				}
-				else if(flow_rate >= MED_TRAFFIC && rounds_since_light_change > 3) {
-					xEventGroupSetBits(Change_Light_Flag, 0);
-					xQueueSend(Traffic_Light_Delay_Queue, &MED_TRAFFIC_DELAY, 1000);
+		// Get flow rate from queue
+		if (xQueueReceive(Traffic_Flow_Queue, &flow_rate, 500)) {
+			if (flow_rate >= MAX_TRAFFIC && rounds_since_light_change > 1) {
+				xEventGroupSetBits(Change_Light_Flag, 0);
 
-					rounds_since_light_change = 0;
-				}
-				else if(rounds_since_light_change > 6) {
-					xEventGroupSetBits(Change_Light_Flag, 0);
-					xQueueSend(Traffic_Light_Delay_Queue, &MIN_TRAFFIC_DELAY, 1000);
-
-					rounds_since_light_change = 0;
+				if ( xTimerIsTimerActive(Traffic_Light_Timer) == pdFALSE ) {
+						light_delay = 2;
 				}
 
-				else {
-					rounds_since_light_change++;
-				}
+				rounds_since_light_change = 0;
 			}
-		// }
+			else if(flow_rate >= MED_TRAFFIC && rounds_since_light_change > 3) {
+				xEventGroupSetBits(Change_Light_Flag, 0);
+
+				if ( xTimerIsTimerActive(Traffic_Light_Timer) == pdFALSE ) {
+						light_delay = 3;
+				}
+
+				rounds_since_light_change = 0;
+			}
+			else if(rounds_since_light_change > 6) {
+				xEventGroupSetBits(Change_Light_Flag, 0);
+
+				if ( xTimerIsTimerActive(Traffic_Light_Timer) == pdFALSE ) {
+						light_delay = 4;
+				}
+
+				rounds_since_light_change = 0;
+			}
+
+			else {
+				rounds_since_light_change++;
+			}
+
+			xTimerChangePeriod(Traffic_Light_Timer, pdMS_TO_TICKS(light_delay), 0);
+
+		}
 		vTaskDelay(1000);
 	}
 
@@ -416,7 +477,6 @@ static void Traffic_Display_Task() {
 
 	while (1) {
 		if (xQueueReceive(Traffic_Display_Queue, &traffic, 500)) {
-			uint32_t test = traffic & 0x3FFFF;
 			enumerate_traffic(traffic & 0x3FFFF);
 			// if red light, delay for specified time
 			if ((traffic >> 11 & 0x7) == 4) {
@@ -430,7 +490,18 @@ static void Traffic_Display_Task() {
 
 }
 
-unsigned int shift_traffic(unsigned int prev_traffic, int change_light, int add_car) {
+uint32_t shift_traffic(int add_car) {
+	uint32_t prev_traffic;
+
+	if (!xQueueReceive(Traffic_Display_Queue, &prev_traffic, 500)) {
+		prev_traffic = 0;
+	}
+
+	int change_light;
+
+	if(!xQueueReceive(Change_Light_Flag, &change_light, 500)) {
+		change_light = 0;
+	}
 
 	// shift first 8 bits
 	unsigned int first_eight_cars = prev_traffic & 0xFF;
@@ -446,22 +517,28 @@ unsigned int shift_traffic(unsigned int prev_traffic, int change_light, int add_
 	unsigned int light_colour = prev_traffic >> 11 & 0x7;
 
 	unsigned int new_light_colour = light_colour;
-	if(change_light == 1) {
-		get_next_light_colour(light_colour);
+	if(change_light == 1 || light_colour == 0) {
+		new_light_colour = get_next_light_colour(light_colour);
 	}
-
-	new_light_colour = 1;
 
 	//shift the last eight lights
 	unsigned int last_eight_cars = (prev_traffic >> 14) & 0xFF;
 	unsigned int shifted_last_eight_cars = ((last_eight_cars << 1) | (prev_traffic >> 10 & 0x1)) & 0xFF;
-	unsigned int updated_traffic = (((shifted_last_eight_cars | 0x00) << 14) | (new_light_colour << 11)| (shifted_middle_three_cars << 8)| (shifted_first_eight_cars));
 
-	return updated_traffic;
+	// stop the first eight cars if light is red
+	if(light_colour == 4) {
+		// can shift up to red light for first 8 cars
+		if ((first_eight_cars & 0b10000000) == 1) {
+			shifted_first_eight_cars = first_eight_cars;
+		}
+	}
+	return (((shifted_last_eight_cars | 0x00) << 14) | (new_light_colour << 11)| (shifted_middle_three_cars << 8)| (shifted_first_eight_cars)) & 0x3fffff;
 
 }
 
-static void enumerate_traffic(unsigned int traffic_to_display) {
+
+
+static void enumerate_traffic(uint32_t traffic_to_display) {
 	// clear -> 0
 	GPIO_ResetBits(GPIOC, GPIO_Pin_8);
 	GPIO_SetBits(GPIOC, GPIO_Pin_8);
@@ -499,6 +576,13 @@ void sleep(unsigned int mseconds)
 		int j = 0;
 		while(++j < mseconds);
 
+}
+
+
+/*-----------------------------------------------------------*/
+void vTrafficLightCallback(void* arg) {
+	int change_traffic = 1;
+	xQueueSend(Change_Light_Flag, &change_traffic, 1000);
 }
 
 void vApplicationMallocFailedHook( void )
