@@ -175,11 +175,6 @@ the queue empty. */
 static void prvSetupHardware( void );
 void vTrafficLightCallback(void* arg);
 
-/// Traffic 10101010 001 (green yellow) 010 01010101
-// 01010100 010 (yellow light) 100 10101011
-// 01010100 010 			   100 10101011
-// green light 001, yellow 010, red 100
-// value in decimal is
 #include <stdio.h>
 #include <time.h>
 #include <stdlib.h>
@@ -206,11 +201,8 @@ static void Traffic_Display_Task();
 
 void sleep(unsigned int mseconds);
 
-
 GPIO_InitTypeDef  GPIO_InitStructureC;
-GPIO_InitTypeDef  GPIO_InitStructureA;
 
-// set these vals
 int MAX_RANGE_POT_VAL = 1500;
 int MED_RANGE_POT_VAL = 1000;
 int MIN_RANGE_POT_VAL = 500;
@@ -225,6 +217,8 @@ int MED_TRAFFIC_DELAY = 4000;
 int MIN_TRAFFIC_DELAY = 6000;
 
 int GREEN_LIGHT = 0b001;
+int YELLOW_LIGHT = 0b010;
+int RED_LIGHT = 0b100;
 
 unsigned int ADD_CAR = 1;
 unsigned int DO_NOT_ADD_CAR = 0;
@@ -232,12 +226,10 @@ unsigned int DO_NOT_ADD_CAR = 0;
 unsigned int CHANGE_TRAFFIC_LIGHT = 1;
 unsigned int DO_NOT_CHANGE_TRAFFIC_LIGHT = 0;
 
-
 xQueueHandle Traffic_Flow_Queue = 0;
 xQueueHandle Traffic_Light_Delay_Queue = 0;
 xQueueHandle Traffic_Display_Queue = 0;
 xQueueHandle Prev_Traffic_Queue = 0;
-
 
 TimerHandle_t Traffic_Light_Timer;
 
@@ -252,10 +244,10 @@ static void setUpADC() {
 	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
 
-	GPIO_InitStructureA.GPIO_Pin =  GPIO_Pin_1;
-	GPIO_InitStructureA.GPIO_Mode = GPIO_Mode_AN;
-	GPIO_InitStructureA.GPIO_PuPd = GPIO_PuPd_NOPULL;
-	GPIO_InitStructureA.GPIO_Speed = GPIO_Speed_2MHz;
+	GPIO_InitStructureC.GPIO_Pin =  GPIO_Pin_1;
+	GPIO_InitStructureC.GPIO_Mode = GPIO_Mode_AN;
+	GPIO_InitStructureC.GPIO_PuPd = GPIO_PuPd_NOPULL;
+	GPIO_InitStructureC.GPIO_Speed = GPIO_Speed_2MHz;
 
 	GPIO_Init(GPIOC, &GPIO_InitStructureA);
 
@@ -276,9 +268,8 @@ static void setUpADC() {
 
 	// Set Channel for ADC
 	ADC_RegularChannelConfig(ADC1, ADC_Channel_11, 1, ADC_SampleTime_144Cycles);
-
-	// Enable ADC1
 }
+
 static void setUpGPIO(){
 	/* PC6 -> A, B*/
 	/* PC8 -> CLR*/
@@ -286,7 +277,7 @@ static void setUpGPIO(){
 
 	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
 
-	GPIO_InitStructureC.GPIO_Pin =  GPIO_Pin_6 | GPIO_Pin_7 | GPIO_Pin_8 | GPIO_Pin_9;
+	GPIO_InitStructureC.GPIO_Pin =  GPIO_Pin_6 | GPIO_Pin_7 | GPIO_Pin_8;
 	GPIO_InitStructureC.GPIO_Mode = GPIO_Mode_OUT;
 	GPIO_InitStructureC.GPIO_OType = GPIO_OType_PP;
 	GPIO_InitStructureC.GPIO_PuPd = GPIO_PuPd_UP;
@@ -324,12 +315,11 @@ int main(void) {
 	xTaskCreate( Traffic_Light_Task, "Traffic_Light", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 	xTaskCreate( Traffic_Display_Task, "Traffic_Display", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 
-
+	// set the initial traffic value to 0 i.e. no traffic
 	int initial_traffic = 0;
 	xQueueSend(Prev_Traffic_Queue, &initial_traffic, 1000);
 
 	xTimerStart(Traffic_Light_Timer, 100);
-
 
 	//Start tasks and timers
 	 vTaskStartScheduler();
@@ -411,9 +401,7 @@ static void Traffic_Creator_Task() {
 				traffic_to_display = shift_traffic(DO_NOT_ADD_CAR);
 				rounds_since_last_added_car++ ;
 			}
-
-			// send twice, one for traffic display and one as reference to previous traffic for shifting
-
+			
 			xQueueSend(Traffic_Display_Queue, &traffic_to_display, 1000);
 		}
 
@@ -431,10 +419,12 @@ static void Traffic_Light_Task() {
 		if (xQueueReceive(Traffic_Flow_Queue, &flow_rate, 500)) {
 			// light change every 2 seconds for max traffic
 			if (xTimerIsTimerActive(Traffic_Light_Timer) == pdFALSE ) {
+				// update flow rate to minimum value to avoid very long periods for small flow rates
 				if (flow_rate < 750) {
 					flow_rate = 750;
 				}
 				light_delay = 8000 / (flow_rate/500);
+				// update the traffic light period
 				xTimerChangePeriod(Traffic_Light_Timer, pdMS_TO_TICKS(light_delay), 0);
 			}
 
@@ -445,8 +435,7 @@ static void Traffic_Light_Task() {
 }
 static void Traffic_Display_Task() {
 	uint32_t traffic;
-	int traffic_delay_on_red;
-
+	
 	while (1) {
 		if (xQueueReceive(Traffic_Display_Queue, &traffic, 500)) {
 			enumerate_traffic(traffic & 0x3FFFFF);
@@ -461,42 +450,45 @@ uint32_t shift_traffic(int add_car) {
 
 	if (xQueueReceive(Prev_Traffic_Queue, &prev_traffic, 500)) {
 		int change_light;
-
+		
+		// checks if the traffic light should be changed
 		if(!xQueueReceive(Change_Light_Flag, &change_light, 500)) {
 			change_light = 0;
 		}
+		// seperate traffic into logical groups
 		unsigned int first_eight_cars = prev_traffic & 0xFF;
 		unsigned int middle_three_cars = (prev_traffic >> 8 & 0x3);
 		unsigned int last_eight_cars = (prev_traffic >> 14) & 0xFF;
 
-		// transition the light colour
 		unsigned int light_colour = prev_traffic >> 11 & 0x7;
 
 		unsigned int new_light_colour = light_colour;
+		// transition the light colour if light should be changed or on first round (when traffic is 0)
 		if(change_light == 1 || light_colour == 0) {
 			new_light_colour = get_next_light_colour(light_colour);
 		}
 
-		//shift the last eight lights
+		//shift the last eight bits
 		unsigned int shifted_last_eight_cars = ((last_eight_cars << 1) | (prev_traffic >> 10 & 0x1)) & 0xFF;
-
+		// shift the middle three cars
 		unsigned int shifted_middle_three_cars = (middle_three_cars << 1);
 
-		// shift first 8 bits
 		unsigned int shifted_first_eight_cars = 0;
-		// stop the first eight cars if light is red
-		if(light_colour == 4) {
-			// can shift up to red light for first 8 cars
+		
+		// shift the first eight lights accordingly if red light
+		if(light_colour == RED_LIGHT) {
+			// set prev_bit to 1, indicating that the most significant bit cannot be shifted through light
 			uint8_t prev_bit = 1;
 
 			int shift = 7;
-
+			// loop from MSB to LSB to determine whether each bit can be shifted or not
 			while (shift >= 0) {
-				// can shift car
+				// if previous bit is 0, and current bit is 1, then bit can be shifted by 1
 				if ((((first_eight_cars >> shift) & 1) == 1) && (prev_bit == 0)) {
 					shifted_first_eight_cars = shifted_first_eight_cars |= (1 << shift + 1);
 					prev_bit = 1;
 				}
+				// if previous bit is 1, and current bit is 1, can't be shifted so write back to same position
 				else if((((first_eight_cars >> shift) & 1) == 1) && prev_bit == 1) {
 					shifted_first_eight_cars = shifted_first_eight_cars |= (1 << shift);
 					prev_bit = 1;
@@ -506,30 +498,29 @@ uint32_t shift_traffic(int add_car) {
 				}
 				shift--;
 			}
-			// add a car if there's room
+			// add a car if there's room, i.e. LSB is 0
 			if (add_car == 1) {
 				if((shifted_first_eight_cars & 1) == 0) {
 					shifted_first_eight_cars |= 1;
 				}
 			}
 		}
-
+		// green or yellow light
 		else {
-			// either |1 or |0 based on the values from traffic flow task
 			shifted_first_eight_cars = first_eight_cars << 1 | add_car;
 			shifted_middle_three_cars = shifted_middle_three_cars | (first_eight_cars >> 8 & 0x1);
 		}
 
 		uint32_t updated_traffic;
 		updated_traffic = (((shifted_last_eight_cars | 0x00) << 14) | (new_light_colour << 11)| (shifted_middle_three_cars << 8)| (shifted_first_eight_cars)) & 0x3fffff;
-
+		
+		// write updated traffic to queue to be used as a history for next round
 		xQueueSend(Prev_Traffic_Queue, &updated_traffic, 1000);
 
 		return updated_traffic;
 	}
-
+	// should never hit this line
 	return 0;
-
 }
 
 
@@ -541,11 +532,10 @@ static void enumerate_traffic(uint32_t traffic_to_display) {
 
 	unsigned int number_lights = 22;
 	unsigned int current_light = 0;
-
+	
+	// send data to shift register from LSB to MSB
 	while(current_light <= number_lights) {
 		unsigned int emulated_light = (traffic_to_display >> (number_lights - current_light)) & 0x1;
-
-		printf("%d\n", emulated_light);
 
 		// write emulated_light val to PC6
 		 GPIO_WriteBit(GPIOC, GPIO_Pin_6, emulated_light);
@@ -560,17 +550,17 @@ static void enumerate_traffic(uint32_t traffic_to_display) {
 }
 
 static unsigned int get_next_light_colour(unsigned int light_colour) {
-	if (light_colour == 1 || light_colour == 2) {
+	if (light_colour == GREEN_LIGHT || light_colour == YELLOW_LIGHT) {
 		return light_colour << 1;
 	}
-
-	return 1;
+	// if red, return green
+	return GREEN_LIGHT;
 }
 
 void sleep(unsigned int mseconds)
 {
-		int j = 0;
-		while(++j < mseconds);
+	int j = 0;
+	while(++j < mseconds);
 
 }
 
