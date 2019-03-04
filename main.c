@@ -330,8 +330,9 @@ int main(void) {
 
 	xTimerStart(Traffic_Light_Timer, 100);
 
+
 	//Start tasks and timers
-	vTaskStartScheduler();
+	 vTaskStartScheduler();
 }
 
 static void Traffic_Flow_Task() {
@@ -448,7 +449,7 @@ static void Traffic_Display_Task() {
 
 	while (1) {
 		if (xQueueReceive(Traffic_Display_Queue, &traffic, 500)) {
-			enumerate_traffic(traffic & 0x3FFFF);
+			enumerate_traffic(traffic & 0x3FFFFF);
 		}
 		vTaskDelay(1000);
 	}
@@ -540,7 +541,6 @@ static void enumerate_traffic(uint32_t traffic_to_display) {
 
 	unsigned int number_lights = 22;
 	unsigned int current_light = 0;
-
 
 	while(current_light <= number_lights) {
 		unsigned int emulated_light = (traffic_to_display >> (number_lights - current_light)) & 0x1;
