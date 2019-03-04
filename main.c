@@ -249,7 +249,7 @@ static void setUpADC() {
 	GPIO_InitStructureC.GPIO_PuPd = GPIO_PuPd_NOPULL;
 	GPIO_InitStructureC.GPIO_Speed = GPIO_Speed_2MHz;
 
-	GPIO_Init(GPIOC, &GPIO_InitStructureA);
+	GPIO_Init(GPIOC, &GPIO_InitStructureC;
 
 	 ADC_DeInit();
 
